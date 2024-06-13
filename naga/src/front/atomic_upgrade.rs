@@ -1,6 +1,8 @@
 //! [`Module`] helpers for "upgrading" atomics in the SPIR-V (and eventually GLSL) frontends.
 use std::sync::{atomic::AtomicUsize, Arc};
 
+use rustc_hash::FxHashMap;
+
 use crate::{
     Expression, Function, GlobalVariable, Handle, LocalVariable, Module, StructMember, Type,
     TypeInner,
@@ -84,14 +86,27 @@ impl Padding {
     }
 }
 
+type ExpressionHandle = (Option<Handle<Function>>, Handle<Expression>);
+
 struct UpgradeState<'a> {
     padding: Padding,
     module: &'a mut Module,
+    upgraded_exprs: FxHashMap<ExpressionHandle, Handle<Expression>>,
 }
 
 impl<'a> UpgradeState<'a> {
     fn inc_padding(&self) -> Padding {
         self.padding.inc_padding()
+    }
+
+    fn add_upgraded(
+        &mut self,
+        maybe_fn_handle: Option<Handle<Function>>,
+        prev: Handle<Expression>,
+        new: Handle<Expression>,
+    ) {
+        log::trace!("{}{maybe_fn_handle:?}, {prev:?} => {new:?}", self.padding);
+        self.upgraded_exprs.insert((maybe_fn_handle, prev), new);
     }
 
     /// Upgrade the type, recursing until we reach the leaves.
@@ -274,6 +289,7 @@ impl<'a> UpgradeState<'a> {
             let span = arena.get_span(handle);
             let new_handle = arena.append(new_expr, span);
             padding.debug("new expr handle: ", new_handle);
+            self.add_upgraded(maybe_fn_handle, handle, new_handle);
             Ok(new_handle)
         } else {
             Ok(handle)
@@ -290,6 +306,7 @@ impl Module {
         let mut state = UpgradeState {
             padding: Default::default(),
             module: self,
+            upgraded_exprs: Default::default(),
         };
 
         for op in ops.into_iter() {
@@ -314,6 +331,8 @@ impl Module {
             let _new_pointer_handle =
                 state.upgrade_expression(maybe_fn_handle, op.pointer_handle)?;
         }
+
+        log::trace!("all upgraded: {:#?}", state.upgraded_exprs);
 
         Ok(())
     }
