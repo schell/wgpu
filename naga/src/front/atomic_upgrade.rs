@@ -7,8 +7,8 @@ use std::{
 use rustc_hash::FxHashMap;
 
 use crate::{
-    Constant, Expression, Function, GlobalVariable, Handle, LocalVariable, Module, Override,
-    StructMember, Type, TypeInner,
+    Constant, Expression, Function, FunctionArgument, GlobalVariable, Handle, LocalVariable,
+    Module, Override, StructMember, Type, TypeInner,
 };
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -17,6 +17,8 @@ pub enum Error {
     MissingHandle(crate::arena::BadHandle),
     #[error("no function context")]
     NoFunction,
+    #[error("function {0:?} is missing arg {1}")]
+    MissingFnArg(Handle<Function>, usize),
     #[error("encountered an unsupported expression")]
     Unsupported,
 }
@@ -48,15 +50,12 @@ pub(crate) struct AtomicOp {
     pub pointer_handle: Handle<Expression>,
 }
 
-#[derive(Default)]
-struct Padding {
-    padding: Arc<AtomicUsize>,
-    current: usize,
-}
+#[derive(Clone, Default)]
+struct Padding(Arc<AtomicUsize>);
 
 impl std::fmt::Display for Padding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for _ in 0..self.current {
+        for _ in 0..self.0.load(std::sync::atomic::Ordering::Relaxed) {
             f.write_str("  ")?;
         }
         Ok(())
@@ -65,32 +64,32 @@ impl std::fmt::Display for Padding {
 
 impl Drop for Padding {
     fn drop(&mut self) {
-        let _ = self
-            .padding
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 impl Padding {
-    fn debug(&self, msg: impl std::fmt::Display, t: impl std::fmt::Debug) {
+    fn trace(&self, msg: impl std::fmt::Display, t: impl std::fmt::Debug) {
         format!("{msg} {t:#?}")
             .split('\n')
             .for_each(|ln| log::trace!("{self}{ln}"));
     }
 
+    fn debug(&self, msg: impl std::fmt::Display, t: impl std::fmt::Debug) {
+        format!("{msg} {t:#?}")
+            .split('\n')
+            .for_each(|ln| log::debug!("{self}{ln}"));
+    }
+
     fn inc_padding(&self) -> Padding {
-        let current = self
-            .padding
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Padding {
-            padding: self.padding.clone(),
-            current,
-        }
+        let _ = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.clone()
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum AnyHandle {
+    Type(Handle<Type>),
     GblExpr(Handle<Expression>),
     GblVar(Handle<GlobalVariable>),
     Constant(Handle<Constant>),
@@ -98,6 +97,12 @@ enum AnyHandle {
     FnExpr(Handle<Function>, Handle<Expression>),
     FnVar(Handle<Function>, Handle<LocalVariable>),
     FnArg(Handle<Function>, usize),
+}
+
+impl From<Handle<Type>> for AnyHandle {
+    fn from(value: Handle<Type>) -> Self {
+        Self::Type(value)
+    }
 }
 
 impl From<Handle<Expression>> for AnyHandle {
@@ -153,10 +158,45 @@ impl From<(Handle<Function>, usize)> for AnyHandle {
 }
 
 impl AnyHandle {
+    const fn to_type(self) -> Option<Handle<Type>> {
+        match self {
+            AnyHandle::Type(h) => Some(h),
+            _ => None,
+        }
+    }
+
+    const fn to_override(self) -> Option<Handle<Override>> {
+        match self {
+            AnyHandle::Override(h) => Some(h),
+            _ => None,
+        }
+    }
+
+    const fn to_constant(self) -> Option<Handle<Constant>> {
+        match self {
+            AnyHandle::Constant(h) => Some(h),
+            _ => None,
+        }
+    }
+
+    const fn to_gbl_var(self) -> Option<Handle<GlobalVariable>> {
+        match self {
+            AnyHandle::GblVar(h) => Some(h),
+            _ => None,
+        }
+    }
+
     const fn to_expr(self) -> Option<Handle<Expression>> {
         match self {
             AnyHandle::GblExpr(h) => Some(h),
             AnyHandle::FnExpr(_, h) => Some(h),
+            _ => None,
+        }
+    }
+
+    const fn to_fn_var(self) -> Option<Handle<LocalVariable>> {
+        match self {
+            AnyHandle::FnVar(_fh, h) => Some(h),
             _ => None,
         }
     }
@@ -171,10 +211,12 @@ struct UpgradeState<'a> {
 }
 
 impl<'a> UpgradeState<'a> {
+    /// Increment the log padding level.
     fn inc_padding(&self) -> Padding {
         self.padding.inc_padding()
     }
 
+    /// Add the new symbol as an upgrade from a previous one.
     fn add_upgraded(
         &mut self,
         prev_any_handle: impl Into<AnyHandle>,
@@ -182,13 +224,28 @@ impl<'a> UpgradeState<'a> {
     ) {
         let prev_any_handle = prev_any_handle.into();
         let new_any_handle = new_any_handle.into();
-        log::trace!("{}{prev_any_handle:?} => {new_any_handle:?}", self.padding);
+        log::debug!(
+            "{}adding upgrade: {prev_any_handle:?} => {new_any_handle:?}",
+            self.padding
+        );
         self.upgraded_handles
             .insert(prev_any_handle, new_any_handle);
         self.unresolved_handles
             .push_front((prev_any_handle, new_any_handle));
     }
 
+    /// Instead of always recreating new symbols, we can return a previously upgraded
+    /// symbol. If we do not, the entire process gets stuck in an infinite loop of
+    /// upgrades.
+    ///
+    /// > But what about when we want to resolve newly added upgrades within a previously
+    /// upgraded symbol?
+    ///
+    /// For those cases I think it's fine to only recurse into that
+    /// newly created symbol and not the symbol it was upgraded _from_. In this way
+    /// each newly created symbol will be one step/change from the one it was upgraded
+    /// from, and eventually all things that need replacing will be replaced - albeit
+    /// with many, many extra symbols strewn about the `Module`, which is fine.
     fn get_upgraded(&self, haystack: impl Into<AnyHandle>) -> Option<AnyHandle> {
         let haystack = haystack.into();
         let replacement = self.upgraded_handles.get(&haystack)?;
@@ -204,9 +261,12 @@ impl<'a> UpgradeState<'a> {
         self.unresolved_handles.pop_back()
     }
 
+    /// Compare `haystack` to the current search "needle" and if they are equal, return
+    /// the replacement.
     fn compare_to_search(&self, haystack: impl Into<AnyHandle>) -> Option<AnyHandle> {
         let (needle, replacement) = self.needle_and_replacement?;
         if needle == haystack.into() {
+            log::trace!("replacing {needle:?} => {replacement:?}");
             Some(replacement)
         } else {
             None
@@ -215,22 +275,32 @@ impl<'a> UpgradeState<'a> {
 
     /// Upgrade the type, recursing until we reach the leaves.
     /// At the leaves, replace scalars with atomic scalars.
+    ///
+    /// NOTE: we *don't* automatically add types to the list of upgrades because
+    /// not all types need to be resolved and replaced everywhere.
+    /// For example, consider the implications of doing this when encountering the
+    /// scalar `u32` type: every reference of `u32` would be replaced with an atomic,
+    /// which is obviously incorrect.   
     fn upgrade_type(&mut self, type_handle: Handle<Type>) -> Result<Handle<Type>, Error> {
         let padding = self.inc_padding();
-        padding.debug("upgrading type: ", type_handle);
+
+        if let Some(replacement) = self
+            .compare_to_search(type_handle)
+            .and_then(|h| h.to_type())
+        {
+            return Ok(replacement);
+        }
+
+        padding.trace("upgrading type: ", type_handle);
         let type_ = self
             .module
             .types
             .get_handle(type_handle)
             .map_err(Error::MissingHandle)?
             .clone();
-        padding.debug("type: ", &type_);
 
-        let new_inner = match type_.inner {
-            TypeInner::Scalar(scalar) => {
-                log::trace!("{padding}hit the scalar leaf, replacing with an atomic");
-                TypeInner::Atomic(scalar)
-            }
+        let new_inner = match type_.inner.clone() {
+            TypeInner::Scalar(scalar) => TypeInner::Atomic(scalar),
             TypeInner::Pointer { base, space } => TypeInner::Pointer {
                 base: self.upgrade_type(base)?,
                 space,
@@ -268,15 +338,27 @@ impl<'a> UpgradeState<'a> {
             n => n,
         };
 
-        let new_type_handle = self.module.types.insert(
-            Type {
-                name: type_.name,
-                inner: new_inner,
-            },
-            self.module.types.get_span(type_handle),
-        );
-        padding.debug("new_type: ", new_type_handle);
-        Ok(new_type_handle)
+        let new_type = Type {
+            name: type_.name.clone(),
+            inner: new_inner,
+        };
+        let new_handle = if let Some(handle) = self.module.types.get(&new_type) {
+            padding.trace("type exists: ", handle);
+            handle
+        } else {
+            padding.debug("type: ", type_handle);
+            padding.debug("from: ", &type_);
+            padding.debug("to:   ", &new_type);
+
+            let new_handle = self
+                .module
+                .types
+                .insert(new_type, self.module.types.get_span(type_handle));
+            padding.debug("h: ", new_handle);
+            new_handle
+        };
+
+        Ok(new_handle)
     }
 
     fn upgrade_global_variable(
@@ -284,11 +366,18 @@ impl<'a> UpgradeState<'a> {
         handle: Handle<GlobalVariable>,
     ) -> Result<Handle<GlobalVariable>, Error> {
         let padding = self.inc_padding();
-        padding.debug("upgrading global variable: ", handle);
+
+        if let Some(replacement) = self.compare_to_search(handle).and_then(|h| h.to_gbl_var()) {
+            return Ok(replacement);
+        }
+
+        if let Some(replacement) = self.get_upgraded(handle).and_then(|h| h.to_gbl_var()) {
+            return Ok(replacement);
+        }
+
+        padding.trace("upgrading global variable: ", handle);
 
         let var = self.module.global_variables.try_get(handle)?.clone();
-        padding.debug("global variable:", &var);
-
         let new_var = GlobalVariable {
             name: var.name.clone(),
             space: var.space,
@@ -297,10 +386,11 @@ impl<'a> UpgradeState<'a> {
             init: self.upgrade_opt_expression(None, var.init)?,
         };
         if new_var != var {
-            padding.debug("new global variable: ", &new_var);
+            padding.debug("global var:     ", &var);
+            padding.debug("new global var: ", &new_var);
             let span = self.module.global_variables.get_span(handle);
             let new_handle = self.module.global_variables.append(new_var, span);
-            padding.debug("new global variable handle: ", new_handle);
+            self.add_upgraded(handle, new_handle);
             Ok(new_handle)
         } else {
             Ok(handle)
@@ -313,7 +403,22 @@ impl<'a> UpgradeState<'a> {
         handle: Handle<LocalVariable>,
     ) -> Result<Handle<LocalVariable>, Error> {
         let padding = self.inc_padding();
-        padding.debug("upgrading local variable: ", handle);
+
+        if let Some(replacement) = self
+            .compare_to_search((fn_handle, handle))
+            .and_then(|h| h.to_fn_var())
+        {
+            return Ok(replacement);
+        }
+
+        if let Some(replacement) = self
+            .get_upgraded((fn_handle, handle))
+            .and_then(|h| h.to_fn_var())
+        {
+            return Ok(replacement);
+        }
+
+        padding.trace("upgrading local variable: ", handle);
 
         let (var, span) = {
             let f = self.module.functions.try_get(fn_handle)?;
@@ -321,7 +426,6 @@ impl<'a> UpgradeState<'a> {
             let span = f.local_variables.get_span(handle);
             (var, span)
         };
-        padding.debug("local variable:", &var);
 
         let new_var = LocalVariable {
             name: var.name.clone(),
@@ -329,10 +433,11 @@ impl<'a> UpgradeState<'a> {
             init: self.upgrade_opt_expression(Some(fn_handle), var.init)?,
         };
         if new_var != var {
-            padding.debug("new local variable: ", &new_var);
+            padding.debug("local var:     ", &var);
+            padding.debug("new local var: ", &new_var);
             let f = self.module.functions.get_mut(fn_handle);
             let new_handle = f.local_variables.append(new_var, span);
-            padding.debug("new local variable handle: ", new_handle);
+            self.add_upgraded((fn_handle, handle), (fn_handle, new_handle));
             Ok(new_handle)
         } else {
             Ok(handle)
@@ -341,10 +446,18 @@ impl<'a> UpgradeState<'a> {
 
     fn upgrade_constant(&mut self, handle: Handle<Constant>) -> Result<Handle<Constant>, Error> {
         let padding = self.inc_padding();
-        padding.debug("upgrading const: ", handle);
+
+        if let Some(replacement) = self.compare_to_search(handle).and_then(|h| h.to_constant()) {
+            return Ok(replacement);
+        }
+
+        if let Some(replacement) = self.get_upgraded(handle).and_then(|h| h.to_constant()) {
+            return Ok(replacement);
+        }
+
+        padding.trace("upgrading const: ", handle);
 
         let constant = self.module.constants.try_get(handle)?.clone();
-        padding.debug("constant: ", &constant);
 
         let new_constant = Constant {
             name: constant.name.clone(),
@@ -353,12 +466,13 @@ impl<'a> UpgradeState<'a> {
         };
 
         if constant != new_constant {
-            padding.debug("inserting new constant: ", &new_constant);
+            padding.debug("constant:     ", &constant);
+            padding.debug("new constant: ", &new_constant);
             let new_handle = self
                 .module
                 .constants
                 .append(new_constant, self.module.constants.get_span(handle));
-            padding.debug("new constant handle: ", new_handle);
+            self.add_upgraded(handle, new_handle);
             Ok(new_handle)
         } else {
             Ok(handle)
@@ -367,10 +481,18 @@ impl<'a> UpgradeState<'a> {
 
     fn upgrade_override(&mut self, handle: Handle<Override>) -> Result<Handle<Override>, Error> {
         let padding = self.inc_padding();
-        padding.debug("upgrading override: ", handle);
+
+        if let Some(replacement) = self.compare_to_search(handle).and_then(|h| h.to_override()) {
+            return Ok(replacement);
+        }
+
+        if let Some(replacement) = self.get_upgraded(handle).and_then(|h| h.to_override()) {
+            return Ok(replacement);
+        }
+
+        padding.trace("upgrading override: ", handle);
 
         let o = self.module.overrides.try_get(handle)?.clone();
-        padding.debug("override: ", &o);
 
         let new_o = Override {
             name: o.name.clone(),
@@ -380,12 +502,13 @@ impl<'a> UpgradeState<'a> {
         };
 
         if o != new_o {
-            padding.debug("inserting new override: ", &new_o);
+            padding.debug("override:     ", &o);
+            padding.debug("new override: ", &new_o);
             let new_handle = self
                 .module
                 .overrides
                 .append(new_o, self.module.overrides.get_span(handle));
-            padding.debug("new override handle: ", new_handle);
+            self.add_upgraded(handle, new_handle);
             Ok(new_handle)
         } else {
             Ok(handle)
@@ -415,7 +538,6 @@ impl<'a> UpgradeState<'a> {
             .compare_to_search((maybe_fn_handle, handle))
             .and_then(|h| h.to_expr())
         {
-            log::trace!("replacing expr {handle:?} => {replacement:?}");
             return Ok(replacement);
         }
 
@@ -426,7 +548,7 @@ impl<'a> UpgradeState<'a> {
             return Ok(replacement);
         }
 
-        padding.debug("upgrading expr: ", handle);
+        padding.trace("upgrading expr: ", handle);
         let expr = if let Some(fh) = maybe_fn_handle {
             let function = self.module.functions.try_get(fh)?;
             function.expressions.try_get(handle)?.clone()
@@ -434,7 +556,6 @@ impl<'a> UpgradeState<'a> {
             self.module.global_expressions.try_get(handle)?.clone()
         };
 
-        padding.debug("expr: ", &expr);
         let new_expr = match expr.clone() {
             l @ Expression::Literal(_) => l,
             Expression::Constant(h) => Expression::Constant(self.upgrade_constant(h)?),
@@ -471,7 +592,11 @@ impl<'a> UpgradeState<'a> {
                 vector: self.upgrade_expression(maybe_fn_handle, vector)?,
                 pattern,
             },
-            f @ Expression::FunctionArgument(_) => f,
+            Expression::FunctionArgument(index) => {
+                let fn_handle = maybe_fn_handle.ok_or(Error::NoFunction)?;
+                self.upgrade_fn_arg(fn_handle, index as usize)?;
+                Expression::FunctionArgument(index)
+            }
             Expression::GlobalVariable(var) => {
                 Expression::GlobalVariable(self.upgrade_global_variable(var)?)
             }
@@ -607,7 +732,8 @@ impl<'a> UpgradeState<'a> {
         };
 
         if new_expr != expr {
-            padding.debug("inserting new expr: ", &new_expr);
+            padding.debug("expr    : ", &expr);
+            padding.trace("new expr: ", &new_expr);
             let arena = if let Some(fh) = maybe_fn_handle {
                 let f = self.module.functions.get_mut(fh);
                 &mut f.expressions
@@ -621,6 +747,39 @@ impl<'a> UpgradeState<'a> {
         } else {
             Ok(handle)
         }
+    }
+
+    /// Upgrade the function argument, which results in an in-place modification of the argument.
+    fn upgrade_fn_arg(&mut self, fn_handle: Handle<Function>, index: usize) -> Result<(), Error> {
+        let padding = self.inc_padding();
+        padding.trace("upgrading: ", (fn_handle, index));
+
+        let arg = {
+            let f = self.module.functions.try_get(fn_handle)?;
+            f.arguments
+                .get(index)
+                .ok_or(Error::MissingFnArg(fn_handle, index))?
+                .clone()
+        };
+
+        let new_arg = FunctionArgument {
+            name: arg.name.clone(),
+            // TODO: we possibly only want to do the type upgrade if we're searching for this type
+            ty: self.upgrade_type(arg.ty)?,
+            binding: arg.binding.clone(),
+        };
+
+        if new_arg != arg {
+            padding.debug("fn arg:     ", &arg);
+            padding.trace("new fn arg: ", &new_arg);
+            let f = self.module.functions.get_mut(fn_handle);
+            *f.arguments
+                .get_mut(index)
+                .ok_or(Error::MissingFnArg(fn_handle, index))? = new_arg;
+            self.add_upgraded((fn_handle, index), (fn_handle, index));
+        }
+
+        Ok(())
     }
 
     /// Returns all the possible handles that might contain `needle`.
@@ -653,17 +812,22 @@ impl<'a> UpgradeState<'a> {
 
         let mut handles: Vec<AnyHandle> = vec![];
         match needle {
-            // anything could have a reference to a global expression
-            AnyHandle::GblExpr(_) 
-              // expressions may contain global vars, 
-              // therefore anything may contain global vars
-            | AnyHandle::GblVar(_) 
-              // expressions may contain constants, 
-              // therefore anything may contain constants
-            | AnyHandle::Constant(_) 
-              // expressions may contain overrides, 
-              // therefore anything may contain overrides
-            | AnyHandle::Override(_) => {
+            // Anything could have a reference to a global expression
+            // ...and expressions may contain global vars,
+            //    therefore anything may contain global vars
+            // ...and expressions may contain constants,
+            //    therefore anything may contain constants
+            // ...expressions may contain overrides,
+            //    therefore anything may contain overrides
+            //
+            // Also, types are treated as a "global" thing and are found in all
+            // other things, but we don't need to search types, as their handles
+            // are included in the AST as we encounter them.
+            AnyHandle::GblExpr(_)
+            | AnyHandle::GblVar(_)
+            | AnyHandle::Constant(_)
+            | AnyHandle::Override(_)
+            | AnyHandle::Type(_) => {
                 handles.extend(
                     self.module
                         .global_expressions
@@ -688,11 +852,11 @@ impl<'a> UpgradeState<'a> {
                     add_fn_args(self.module, &mut handles, fh);
                 }
             }
-            AnyHandle::FnExpr(fh, _) 
-            | AnyHandle::FnVar(fh, _) 
-            | AnyHandle::FnArg(fh, _) => {
-                    add_fn_exprs(self.module, &mut handles, fh);
-                    add_fn_vars(self.module, &mut handles, fh);
+            // Whereas function expressions, vars and args will *not* be found inside global
+            // things, and furthermore will *only* be found within one function
+            AnyHandle::FnExpr(fh, _) | AnyHandle::FnVar(fh, _) | AnyHandle::FnArg(fh, _) => {
+                add_fn_exprs(self.module, &mut handles, fh);
+                add_fn_vars(self.module, &mut handles, fh);
             }
         }
 
@@ -701,25 +865,30 @@ impl<'a> UpgradeState<'a> {
 
     fn search(&mut self, haystack: AnyHandle) -> Result<(), Error> {
         match haystack {
+            AnyHandle::Type(_) => {
+                // We never use type handles as haystacks, you can verify this by looking
+                // at Upgrade::get_haystacks
+                unreachable!("types aren't used as haystacks");
+            }
             AnyHandle::GblExpr(h) => {
                 let _ = self.upgrade_expression(None, h)?;
-            },
+            }
             AnyHandle::GblVar(h) => {
                 let _ = self.upgrade_global_variable(h)?;
-            },
+            }
             AnyHandle::Constant(h) => {
                 let _ = self.upgrade_constant(h)?;
-            },
+            }
             AnyHandle::Override(h) => {
                 let _ = self.upgrade_override(h)?;
-            },
+            }
             AnyHandle::FnExpr(fh, h) => {
                 let _ = self.upgrade_expression(Some(fh), h)?;
-            },
+            }
             AnyHandle::FnVar(fh, h) => {
                 let _ = self.upgrade_local_variable(fh, h)?;
-            },
-            AnyHandle::FnArg(_fh, _i) => todo!(),
+            }
+            AnyHandle::FnArg(fh, i) => self.upgrade_fn_arg(fh, i)?,
         };
         Ok(())
     }
@@ -754,16 +923,27 @@ impl Module {
                 }
             }
 
+            // Upgrade the pointer's type and then manually add that type to the list of
+            // unresolved upgrades.
+            // We do this because we want to search for references to this type, but types *are not*
+            // automatically added to unresolved upgrades.
+            // For more info see [`UpgradeState::upgrade_type`].
             padding.debug("upgrading the pointer type:", op.pointer_type_handle);
-            let _new_pointer_type_handle = state.upgrade_type(op.pointer_type_handle)?;
+            let new_pointer_type_handle = state.upgrade_type(op.pointer_type_handle)?;
+            state.add_upgraded(op.pointer_type_handle, new_pointer_type_handle);
 
+            // Upgrade the pointer's expression. The upgrade will be automatically recorded.
             padding.debug("upgrading the pointer expression", op.pointer_handle);
             let _new_pointer_handle =
                 state.upgrade_expression(maybe_fn_handle, op.pointer_handle)?;
         }
-
         log::trace!("all upgraded: {:#?}", state.upgraded_handles);
-        while let Some(nr@(needle, _)) = state.pop_unresolved() {
+
+        // Run through all unresolved upgrades and search for references to them in other things,
+        // spiraling outward until there are no more unresolved upgrades.
+        while let Some(nr @ (needle, replacement)) = state.pop_unresolved() {
+            state.padding.debug("searching for: ", needle);
+            state.padding.debug("replacing with: ", replacement);
             state.needle_and_replacement = Some(nr);
             let all_haystacks = state.get_haystacks(needle);
             for haystack in all_haystacks {
