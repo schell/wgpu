@@ -89,14 +89,85 @@ impl Padding {
     }
 }
 
-type ExpressionHandle = (Option<Handle<Function>>, Handle<Expression>);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum AnyHandle {
+    GblExpr(Handle<Expression>),
+    GblVar(Handle<GlobalVariable>),
+    Constant(Handle<Constant>),
+    Override(Handle<Override>),
+    FnExpr(Handle<Function>, Handle<Expression>),
+    FnVar(Handle<Function>, Handle<LocalVariable>),
+    FnArg(Handle<Function>, usize),
+}
+
+impl From<Handle<Expression>> for AnyHandle {
+    fn from(value: Handle<Expression>) -> Self {
+        Self::GblExpr(value)
+    }
+}
+
+impl From<Handle<GlobalVariable>> for AnyHandle {
+    fn from(value: Handle<GlobalVariable>) -> Self {
+        Self::GblVar(value)
+    }
+}
+
+impl From<Handle<Constant>> for AnyHandle {
+    fn from(value: Handle<Constant>) -> Self {
+        Self::Constant(value)
+    }
+}
+
+impl From<Handle<Override>> for AnyHandle {
+    fn from(value: Handle<Override>) -> Self {
+        Self::Override(value)
+    }
+}
+
+impl From<(Option<Handle<Function>>, Handle<Expression>)> for AnyHandle {
+    fn from((mfh, h): (Option<Handle<Function>>, Handle<Expression>)) -> Self {
+        if let Some(fh) = mfh {
+            Self::FnExpr(fh, h)
+        } else {
+            Self::GblExpr(h)
+        }
+    }
+}
+
+impl From<(Handle<Function>, Handle<Expression>)> for AnyHandle {
+    fn from((fh, h): (Handle<Function>, Handle<Expression>)) -> Self {
+        Self::FnExpr(fh, h)
+    }
+}
+
+impl From<(Handle<Function>, Handle<LocalVariable>)> for AnyHandle {
+    fn from((fh, h): (Handle<Function>, Handle<LocalVariable>)) -> Self {
+        Self::FnVar(fh, h)
+    }
+}
+
+impl From<(Handle<Function>, usize)> for AnyHandle {
+    fn from((fh, i): (Handle<Function>, usize)) -> Self {
+        Self::FnArg(fh, i)
+    }
+}
+
+impl AnyHandle {
+    const fn to_expr(self) -> Option<Handle<Expression>> {
+        match self {
+            AnyHandle::GblExpr(h) => Some(h),
+            AnyHandle::FnExpr(_, h) => Some(h),
+            _ => None,
+        }
+    }
+}
 
 struct UpgradeState<'a> {
     padding: Padding,
     module: &'a mut Module,
-    upgraded_exprs: FxHashMap<ExpressionHandle, Handle<Expression>>,
-    unresolved_exprs: VecDeque<(ExpressionHandle, Handle<Expression>)>,
-    search_expr: Option<(ExpressionHandle, Handle<Expression>)>,
+    upgraded_handles: FxHashMap<AnyHandle, AnyHandle>,
+    unresolved_handles: VecDeque<(AnyHandle, AnyHandle)>,
+    needle_and_replacement: Option<(AnyHandle, AnyHandle)>,
 }
 
 impl<'a> UpgradeState<'a> {
@@ -106,28 +177,36 @@ impl<'a> UpgradeState<'a> {
 
     fn add_upgraded(
         &mut self,
-        maybe_fn_handle: Option<Handle<Function>>,
-        prev: Handle<Expression>,
-        new: Handle<Expression>,
+        prev_any_handle: impl Into<AnyHandle>,
+        new_any_handle: impl Into<AnyHandle>,
     ) {
-        log::trace!("{}{maybe_fn_handle:?}, {prev:?} => {new:?}", self.padding);
-        self.upgraded_exprs.insert((maybe_fn_handle, prev), new);
-        self.unresolved_exprs
-            .push_front(((maybe_fn_handle, prev), new));
+        let prev_any_handle = prev_any_handle.into();
+        let new_any_handle = new_any_handle.into();
+        log::trace!("{}{prev_any_handle:?} => {new_any_handle:?}", self.padding);
+        self.upgraded_handles
+            .insert(prev_any_handle, new_any_handle);
+        self.unresolved_handles
+            .push_front((prev_any_handle, new_any_handle));
     }
 
-    /// Dequeue the the next unresolved upgrade.
-    fn pop_unresolved(&mut self) -> Option<(ExpressionHandle, Handle<Expression>)> {
-        self.unresolved_exprs.pop_back()
+    fn get_upgraded(&self, haystack: impl Into<AnyHandle>) -> Option<AnyHandle> {
+        let haystack = haystack.into();
+        let replacement = self.upgraded_handles.get(&haystack)?;
+        log::trace!(
+            "{}{haystack:?} previously upgraded to {replacement:?}",
+            self.padding
+        );
+        Some(*replacement)
     }
 
-    fn compare_to_search(
-        &self,
-        maybe_haystack_fn_handle: Option<Handle<Function>>,
-        haystack: Handle<Expression>,
-    ) -> Option<Handle<Expression>> {
-        let (needle, replacement) = self.search_expr?;
-        if needle == (maybe_haystack_fn_handle, haystack) {
+    /// Dequeue the the next unresolved upgrade handle.
+    fn pop_unresolved(&mut self) -> Option<(AnyHandle, AnyHandle)> {
+        self.unresolved_handles.pop_back()
+    }
+
+    fn compare_to_search(&self, haystack: impl Into<AnyHandle>) -> Option<AnyHandle> {
+        let (needle, replacement) = self.needle_and_replacement?;
+        if needle == haystack.into() {
             Some(replacement)
         } else {
             None
@@ -306,7 +385,7 @@ impl<'a> UpgradeState<'a> {
                 .module
                 .overrides
                 .append(new_o, self.module.overrides.get_span(handle));
-            padding.debug("new override handle: ", &new_handle);
+            padding.debug("new override handle: ", new_handle);
             Ok(new_handle)
         } else {
             Ok(handle)
@@ -332,14 +411,19 @@ impl<'a> UpgradeState<'a> {
     ) -> Result<Handle<Expression>, Error> {
         let padding = self.inc_padding();
 
-        if let Some(replacement) = self.compare_to_search(maybe_fn_handle, handle) {
+        if let Some(replacement) = self
+            .compare_to_search((maybe_fn_handle, handle))
+            .and_then(|h| h.to_expr())
+        {
             log::trace!("replacing expr {handle:?} => {replacement:?}");
             return Ok(replacement);
         }
 
-        if let Some(replacement) = self.upgraded_exprs.get(&(maybe_fn_handle, handle)) {
-            log::trace!("expr {handle:?} has already been replaced by {replacement:?}");
-            return Ok(handle);
+        if let Some(replacement) = self
+            .get_upgraded((maybe_fn_handle, handle))
+            .and_then(|h| h.to_expr())
+        {
+            return Ok(replacement);
         }
 
         padding.debug("upgrading expr: ", handle);
@@ -532,33 +616,112 @@ impl<'a> UpgradeState<'a> {
             };
             let span = arena.get_span(handle);
             let new_handle = arena.append(new_expr, span);
-            padding.debug("new expr handle: ", new_handle);
-            self.add_upgraded(maybe_fn_handle, handle, new_handle);
+            self.add_upgraded((maybe_fn_handle, handle), (maybe_fn_handle, new_handle));
             Ok(new_handle)
         } else {
             Ok(handle)
         }
     }
 
-    fn search_handles(
-        &self,
-        maybe_search_fn_handle: Option<Handle<Function>>,
-    ) -> Vec<ExpressionHandle> {
-        let mut handles = vec![];
-        handles.extend(
-            // add global expressions
-            self.module
-                .global_expressions
-                .iter_handles()
-                .map(|h| (None, h)),
-        );
-        if let Some(fh) = maybe_search_fn_handle {
-            // add function expressions
-            if let Ok(f) = self.module.functions.try_get(fh) {
-                handles.extend(f.expressions.iter_handles().map(|h| (Some(fh), h)));
+    /// Returns all the possible handles that might contain `needle`.
+    fn get_haystacks(&self, needle: AnyHandle) -> Vec<AnyHandle> {
+        fn add_fn_exprs(module: &Module, handles: &mut Vec<AnyHandle>, fh: Handle<Function>) {
+            if let Ok(f) = module.functions.try_get(fh) {
+                handles.extend(
+                    f.expressions
+                        .iter_handles()
+                        .map(|h| AnyHandle::from((fh, h))),
+                );
             }
         }
+
+        fn add_fn_vars(module: &Module, handles: &mut Vec<AnyHandle>, fh: Handle<Function>) {
+            if let Ok(f) = module.functions.try_get(fh) {
+                handles.extend(
+                    f.local_variables
+                        .iter_handles()
+                        .map(|h| AnyHandle::from((fh, h))),
+                );
+            }
+        }
+
+        fn add_fn_args(module: &Module, handles: &mut Vec<AnyHandle>, fh: Handle<Function>) {
+            if let Ok(f) = module.functions.try_get(fh) {
+                handles.extend((0..f.arguments.len()).map(|i| AnyHandle::from((fh, i))));
+            }
+        }
+
+        let mut handles: Vec<AnyHandle> = vec![];
+        match needle {
+            // anything could have a reference to a global expression
+            AnyHandle::GblExpr(_) 
+              // expressions may contain global vars, 
+              // therefore anything may contain global vars
+            | AnyHandle::GblVar(_) 
+              // expressions may contain constants, 
+              // therefore anything may contain constants
+            | AnyHandle::Constant(_) 
+              // expressions may contain overrides, 
+              // therefore anything may contain overrides
+            | AnyHandle::Override(_) => {
+                handles.extend(
+                    self.module
+                        .global_expressions
+                        .iter_handles()
+                        .map(AnyHandle::from),
+                );
+                handles.extend(
+                    self.module
+                        .global_variables
+                        .iter_handles()
+                        .map(AnyHandle::from),
+                );
+                handles.extend(self.module.constants.iter_handles().map(AnyHandle::from));
+                handles.extend(self.module.overrides.iter_handles().map(AnyHandle::from));
+                for fh in self.module.functions.iter_handles() {
+                    add_fn_exprs(self.module, &mut handles, fh);
+                }
+                for fh in self.module.functions.iter_handles() {
+                    add_fn_vars(self.module, &mut handles, fh);
+                }
+                for fh in self.module.functions.iter_handles() {
+                    add_fn_args(self.module, &mut handles, fh);
+                }
+            }
+            AnyHandle::FnExpr(fh, _) 
+            | AnyHandle::FnVar(fh, _) 
+            | AnyHandle::FnArg(fh, _) => {
+                    add_fn_exprs(self.module, &mut handles, fh);
+                    add_fn_vars(self.module, &mut handles, fh);
+            }
+        }
+
         handles
+    }
+
+    fn search(&mut self, haystack: AnyHandle) -> Result<(), Error> {
+        match haystack {
+            AnyHandle::GblExpr(h) => {
+                let _ = self.upgrade_expression(None, h)?;
+            },
+            AnyHandle::GblVar(h) => {
+                let _ = self.upgrade_global_variable(h)?;
+            },
+            AnyHandle::Constant(h) => {
+                let _ = self.upgrade_constant(h)?;
+            },
+            AnyHandle::Override(h) => {
+                let _ = self.upgrade_override(h)?;
+            },
+            AnyHandle::FnExpr(fh, h) => {
+                let _ = self.upgrade_expression(Some(fh), h)?;
+            },
+            AnyHandle::FnVar(fh, h) => {
+                let _ = self.upgrade_local_variable(fh, h)?;
+            },
+            AnyHandle::FnArg(_fh, _i) => todo!(),
+        };
+        Ok(())
     }
 }
 
@@ -571,9 +734,9 @@ impl Module {
         let mut state = UpgradeState {
             padding: Default::default(),
             module: self,
-            upgraded_exprs: Default::default(),
-            unresolved_exprs: Default::default(),
-            search_expr: None,
+            upgraded_handles: Default::default(),
+            unresolved_handles: Default::default(),
+            needle_and_replacement: None,
         };
 
         for op in ops.into_iter() {
@@ -599,13 +762,12 @@ impl Module {
                 state.upgrade_expression(maybe_fn_handle, op.pointer_handle)?;
         }
 
-        log::trace!("all upgraded: {:#?}", state.upgraded_exprs);
-        while let Some(sr @ ((maybe_search_fn_handle, _), _)) = state.pop_unresolved() {
-            state.search_expr = Some(sr);
-            let all_handles = state.search_handles(maybe_search_fn_handle);
-            for (maybe_haystack_fn, haystack) in all_handles {
-                let _yet_another_unresolved =
-                    state.upgrade_expression(maybe_haystack_fn, haystack)?;
+        log::trace!("all upgraded: {:#?}", state.upgraded_handles);
+        while let Some(nr@(needle, _)) = state.pop_unresolved() {
+            state.needle_and_replacement = Some(nr);
+            let all_haystacks = state.get_haystacks(needle);
+            for haystack in all_haystacks {
+                state.search(haystack)?;
             }
         }
 
