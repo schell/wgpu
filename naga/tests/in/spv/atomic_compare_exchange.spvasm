@@ -1,0 +1,49 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Google spiregg; 0
+; Bound: 28
+; Schema: 0
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %csSimpleTest "csSimpleTest" %gl_LocalInvocationID %gl_WorkGroupID
+               OpExecutionMode %csSimpleTest LocalSize 128 1 1
+               OpSource HLSL 600
+               OpName %type_RWStructuredBuffer_uint "type.RWStructuredBuffer.uint"
+               OpName %data "data"
+               OpName %csSimpleTest "csSimpleTest"
+               OpDecorate %gl_LocalInvocationID BuiltIn LocalInvocationId
+               OpDecorate %gl_WorkGroupID BuiltIn WorkgroupId
+               OpDecorate %data DescriptorSet 0
+               OpDecorate %data Binding 1
+               OpDecorate %_runtimearr_uint ArrayStride 4
+               OpMemberDecorate %type_RWStructuredBuffer_uint 0 Offset 0
+               OpDecorate %type_RWStructuredBuffer_uint BufferBlock
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+       %uint = OpTypeInt 32 0
+   %uint_100 = OpConstant %uint 100
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+%_runtimearr_uint = OpTypeRuntimeArray %uint
+%type_RWStructuredBuffer_uint = OpTypeStruct %_runtimearr_uint
+%_ptr_Uniform_type_RWStructuredBuffer_uint = OpTypePointer Uniform %type_RWStructuredBuffer_uint
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+       %void = OpTypeVoid
+         %17 = OpTypeFunction %void
+%_ptr_Uniform_uint = OpTypePointer Uniform %uint
+       %data = OpVariable %_ptr_Uniform_type_RWStructuredBuffer_uint Uniform
+%gl_LocalInvocationID = OpVariable %_ptr_Input_v3uint Input
+%gl_WorkGroupID = OpVariable %_ptr_Input_v3uint Input
+%csSimpleTest = OpFunction %void None %17
+         %19 = OpLabel
+         %20 = OpLoad %v3uint %gl_LocalInvocationID
+         %21 = OpLoad %v3uint %gl_WorkGroupID
+         %22 = OpCompositeExtract %uint %21 0
+         %23 = OpIMul %uint %22 %uint_100
+         %24 = OpCompositeExtract %uint %20 0
+         %25 = OpIAdd %uint %23 %24
+         %26 = OpAccessChain %_ptr_Uniform_uint %data %int_0 %25
+         %27 = OpAtomicExchange %uint %26 %uint_1 %uint_0 %uint_1
+               OpReturn
+               OpFunctionEnd
