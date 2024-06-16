@@ -266,4 +266,11 @@ mod test {
     fn atomic_exchange() {
         atomic_test(include_bytes!("../../tests/in/spv/atomic_exchange.spv"));
     }
+
+    #[test]
+    fn atomic_compare_exchange() {
+        atomic_test(include_bytes!(
+            "../../tests/in/spv/atomic_compare_exchange.spv"
+        ));
+    }
 }

@@ -1,49 +1,87 @@
 ; SPIR-V
-; Version: 1.0
-; Generator: Google spiregg; 0
-; Bound: 28
+; Version: 1.5
+; Generator: Google rspirv; 0
+; Bound: 62
 ; Schema: 0
                OpCapability Shader
-               OpMemoryModel Logical GLSL450
-               OpEntryPoint GLCompute %csSimpleTest "csSimpleTest" %gl_LocalInvocationID %gl_WorkGroupID
-               OpExecutionMode %csSimpleTest LocalSize 128 1 1
-               OpSource HLSL 600
-               OpName %type_RWStructuredBuffer_uint "type.RWStructuredBuffer.uint"
-               OpName %data "data"
-               OpName %csSimpleTest "csSimpleTest"
-               OpDecorate %gl_LocalInvocationID BuiltIn LocalInvocationId
-               OpDecorate %gl_WorkGroupID BuiltIn WorkgroupId
-               OpDecorate %data DescriptorSet 0
-               OpDecorate %data Binding 1
-               OpDecorate %_runtimearr_uint ArrayStride 4
-               OpMemberDecorate %type_RWStructuredBuffer_uint 0 Offset 0
-               OpDecorate %type_RWStructuredBuffer_uint BufferBlock
-        %int = OpTypeInt 32 1
-      %int_0 = OpConstant %int 0
+               OpCapability VulkanMemoryModel
+               OpMemoryModel Logical Vulkan
+               OpEntryPoint GLCompute %1 "stage::test_atomic_compare_exchange" %2 %3
+               OpExecutionMode %1 LocalSize 32 1 1
+               OpMemberDecorate %_struct_11 0 Offset 0
+               OpMemberDecorate %_struct_11 1 Offset 4
+               OpDecorate %_struct_12 Block
+               OpMemberDecorate %_struct_12 0 Offset 0
+               OpDecorate %2 Binding 0
+               OpDecorate %2 DescriptorSet 0
+               OpDecorate %3 NonWritable
+               OpDecorate %3 Binding 1
+               OpDecorate %3 DescriptorSet 0
        %uint = OpTypeInt 32 0
-   %uint_100 = OpConstant %uint 100
-     %uint_0 = OpConstant %uint 0
-     %uint_1 = OpConstant %uint 1
-%_runtimearr_uint = OpTypeRuntimeArray %uint
-%type_RWStructuredBuffer_uint = OpTypeStruct %_runtimearr_uint
-%_ptr_Uniform_type_RWStructuredBuffer_uint = OpTypePointer Uniform %type_RWStructuredBuffer_uint
-     %v3uint = OpTypeVector %uint 3
-%_ptr_Input_v3uint = OpTypePointer Input %v3uint
        %void = OpTypeVoid
-         %17 = OpTypeFunction %void
-%_ptr_Uniform_uint = OpTypePointer Uniform %uint
-       %data = OpVariable %_ptr_Uniform_type_RWStructuredBuffer_uint Uniform
-%gl_LocalInvocationID = OpVariable %_ptr_Input_v3uint Input
-%gl_WorkGroupID = OpVariable %_ptr_Input_v3uint Input
-%csSimpleTest = OpFunction %void None %17
-         %19 = OpLabel
-         %20 = OpLoad %v3uint %gl_LocalInvocationID
-         %21 = OpLoad %v3uint %gl_WorkGroupID
-         %22 = OpCompositeExtract %uint %21 0
-         %23 = OpIMul %uint %22 %uint_100
-         %24 = OpCompositeExtract %uint %20 0
-         %25 = OpIAdd %uint %23 %24
-         %26 = OpAccessChain %_ptr_Uniform_uint %data %int_0 %25
-         %27 = OpAtomicExchange %uint %26 %uint_1 %uint_0 %uint_1
+         %15 = OpTypeFunction %void
+       %bool = OpTypeBool
+     %uint_0 = OpConstant %uint 0
+     %uint_2 = OpConstant %uint 2
+      %false = OpConstantFalse %bool
+%_ptr_StorageBuffer_uint = OpTypePointer StorageBuffer %uint
+     %uint_1 = OpConstant %uint 1
+ %_struct_11 = OpTypeStruct %uint %uint
+         %22 = OpUndef %_struct_11
+     %uint_3 = OpConstant %uint 3
+        %int = OpTypeInt 32 1
+       %true = OpConstantTrue %bool
+ %_struct_12 = OpTypeStruct %uint
+%_ptr_StorageBuffer__struct_12 = OpTypePointer StorageBuffer %_struct_12
+          %2 = OpVariable %_ptr_StorageBuffer__struct_12 StorageBuffer
+          %3 = OpVariable %_ptr_StorageBuffer__struct_12 StorageBuffer
+   %uint_256 = OpConstant %uint 256
+          %1 = OpFunction %void None %15
+         %28 = OpLabel
+         %29 = OpAccessChain %_ptr_StorageBuffer_uint %2 %uint_0
+         %30 = OpAccessChain %_ptr_StorageBuffer_uint %3 %uint_0
+         %31 = OpLoad %uint %30
+         %32 = OpCompositeConstruct %_struct_11 %uint_0 %31
+               OpBranch %33
+         %33 = OpLabel
+         %34 = OpPhi %_struct_11 %32 %28 %35 %36
+               OpLoopMerge %37 %36 None
+               OpBranch %38
+         %38 = OpLabel
+         %39 = OpCompositeExtract %uint %34 0
+         %40 = OpCompositeExtract %uint %34 1
+         %41 = OpULessThan %bool %39 %40
+               OpSelectionMerge %42 None
+               OpBranchConditional %41 %43 %44
+         %43 = OpLabel
+         %46 = OpIAdd %uint %39 %uint_1
+         %48 = OpCompositeInsert %_struct_11 %46 %34 0
+         %49 = OpCompositeConstruct %_struct_11 %uint_1 %39
+               OpBranch %42
+         %44 = OpLabel
+         %50 = OpCompositeInsert %_struct_11 %uint_0 %22 0
+               OpBranch %42
+         %42 = OpLabel
+         %51 = OpPhi %_struct_11 %48 %43 %34 %44
+         %52 = OpPhi %_struct_11 %49 %43 %50 %44
+         %53 = OpCompositeExtract %uint %52 0
+         %54 = OpCompositeExtract %uint %52 1
+         %55 = OpBitcast %int %53
+               OpSelectionMerge %56 None
+               OpSwitch %55 %57 0 %58 1 %59
+         %57 = OpLabel
+               OpBranch %56
+         %58 = OpLabel
+               OpBranch %56
+         %59 = OpLabel
+         %60 = OpAtomicCompareExchange %uint %29 %uint_2 %uint_256 %uint_256 %54 %uint_3
+               OpBranch %56
+         %56 = OpLabel
+         %61 = OpPhi %bool %false %57 %false %58 %true %59
+         %35 = OpPhi %_struct_11 %22 %57 %22 %58 %51 %59
+               OpBranch %36
+         %36 = OpLabel
+               OpBranchConditional %61 %33 %37
+         %37 = OpLabel
                OpReturn
                OpFunctionEnd
