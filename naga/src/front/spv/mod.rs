@@ -4010,6 +4010,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                     log::trace!("\t\t\tlooking up base type {p_ty_base_id:?} of {p_ty:?}");
                     let p_base_ty = self.lookup_type.lookup(p_ty_base_id)?;
 
+                    block.extend(emitter.finish(ctx.expressions));
                     // Create an expression for our result
                     let r_lexp_handle = {
                         let expr = crate::Expression::AtomicResult {
@@ -4027,6 +4028,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         );
                         handle
                     };
+                    emitter.start(ctx.expressions);
 
                     // Create a literal "1" since WGSL lacks an increment operation
                     let one_lexp_handle = make_index_literal(
@@ -4205,6 +4207,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                     let v_lexp_handle =
                         get_expr_handle!(value_id, self.lookup_expression.lookup(value_id)?);
 
+                    block.extend(emitter.finish(ctx.expressions));
                     // Create an expression for our result
                     let r_lexp_handle = {
                         let expr = crate::Expression::AtomicResult {
@@ -4222,6 +4225,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         );
                         handle
                     };
+                    emitter.start(ctx.expressions);
 
                     // Create a statement for the op itself
                     let stmt = crate::Statement::Atomic {
@@ -4276,6 +4280,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         self.lookup_expression.lookup(comparator_id)?
                     );
 
+                    block.extend(emitter.finish(ctx.expressions));
                     // Create an expression for our result
                     let r_lexp_handle = {
                         let expr = crate::Expression::AtomicResult {
@@ -4293,6 +4298,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         );
                         handle
                     };
+                    emitter.start(ctx.expressions);
 
                     // Create a statement for the op itself
                     let stmt = crate::Statement::Atomic {
@@ -4335,6 +4341,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                     log::trace!("\t\t\tlooking up base type {p_ty_base_id:?} of {p_ty:?}");
                     let p_base_ty = self.lookup_type.lookup(p_ty_base_id)?;
 
+                    block.extend(emitter.finish(ctx.expressions));
                     // Create an expression for our result
                     let r_lexp_handle = {
                         let expr = crate::Expression::AtomicResult {
@@ -4352,6 +4359,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                         );
                         handle
                     };
+                    emitter.start(ctx.expressions);
 
                     // Create a literal "1" since WGSL lacks an decrement operation
                     let one_lexp_handle = make_index_literal(
