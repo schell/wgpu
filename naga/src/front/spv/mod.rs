@@ -4129,12 +4129,14 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                     let v_lexp_handle =
                         get_expr_handle!(value_id, self.lookup_expression.lookup(value_id)?);
 
+                    block.extend(emitter.finish(ctx.expressions));
                     // Create a statement for the op itself
                     let stmt = crate::Statement::Store {
                         pointer: p_lexp_handle,
                         value: v_lexp_handle,
                     };
                     block.push(stmt, span);
+                    emitter.start(ctx.expressions);
 
                     // Store any associated global variables so we can upgrade their types later
                     self.upgrade_atomics
