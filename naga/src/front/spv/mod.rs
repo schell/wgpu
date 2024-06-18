@@ -1323,7 +1323,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
         ))
     }
 
-    fn get_pointer_lexp_and_base_ty_handles(
+    fn get_exp_and_base_ty_handles(
         &self,
         pointer_id: spirv::Word,
         ctx: &mut BlockContext,
@@ -1370,7 +1370,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
         let value_id = self.next()?;
 
         let (p_lexp_handle, p_base_ty_handle) =
-            self.get_pointer_lexp_and_base_ty_handles(pointer_id, ctx, emitter, block, body_idx)?;
+            self.get_exp_and_base_ty_handles(pointer_id, ctx, emitter, block, body_idx)?;
 
         log::trace!("\t\t\tlooking up value expr {value_id:?}");
         let v_lexp_handle = self.lookup_expression.lookup(value_id)?.handle;
@@ -4145,7 +4145,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                     let _scope_id = self.next()?;
                     let _memory_semantics_id = self.next()?;
 
-                    let (p_exp_h, p_base_ty_h) = self.get_pointer_lexp_and_base_ty_handles(
+                    let (p_exp_h, p_base_ty_h) = self.get_exp_and_base_ty_handles(
                         pointer_id,
                         ctx,
                         &mut emitter,
@@ -4214,7 +4214,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                     let value_id = self.next()?;
                     let comparator_id = self.next()?;
 
-                    let (p_exp_h, p_base_ty_h) = self.get_pointer_lexp_and_base_ty_handles(
+                    let (p_exp_h, p_base_ty_h) = self.get_exp_and_base_ty_handles(
                         pointer_id,
                         ctx,
                         &mut emitter,
