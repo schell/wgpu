@@ -218,10 +218,8 @@ mod test {
     fn atomic_test(bytes: &[u8]) {
         let _ = env_logger::builder().is_test(true).try_init();
         let m = crate::front::spv::parse_u8_slice(bytes, &Default::default()).unwrap();
-        let mut validator = crate::valid::Validator::new(
-            crate::valid::ValidationFlags::empty(),
-            Default::default(),
-        );
+        let mut validator =
+            crate::valid::Validator::new(crate::valid::ValidationFlags::all(), Default::default());
         let info = match validator.validate(&m) {
             Err(e) => {
                 log::error!("{}", e.emit_to_string(""));
